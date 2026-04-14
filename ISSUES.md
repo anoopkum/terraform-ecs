@@ -305,6 +305,36 @@ policy = file("${path.module}/ecs_deployer.json")
 
 ---
 
+## Issue #9: Resources Not Visible - Wrong AWS Account
+
+**Date:** 2026-04-15  
+**Status:** ✅ Resolved  
+**Severity:** Medium
+
+### Symptom
+After successful `terraform apply` in GitHub Actions, resources were not visible in AWS Console.
+
+### Cause
+Two different AWS accounts were in use:
+- **302263059488** - User's AWS Console login
+- **554423627906** - GitHub Actions secrets (where resources were deployed)
+
+### Solution
+Logged into the correct AWS account (554423627906) where the GitHub Actions secrets pointed to.
+
+### Prevention
+Always verify which AWS account is configured:
+```bash
+# Check local CLI account
+aws sts get-caller-identity
+
+# Verify GitHub secrets match your intended account
+```
+
+Ensure GitHub Actions secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are from the same account you use in the console.
+
+---
+
 ## Future Issues
 
 *This section will be updated as new issues are encountered.*
