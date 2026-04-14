@@ -18,8 +18,10 @@ terraform {
 }
 
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+  # Profile is only used for local development, not in CI
+  # In CI, AWS credentials come from environment variables
+  profile = var.aws_profile != "" ? var.aws_profile : null
 }
 
 module "ecs" {
@@ -55,7 +57,8 @@ variable "environment" {
   description = "A name to describe the environment we're creating."
 }
 variable "aws_profile" {
-  description = "The AWS-CLI profile for the account to create resources in."
+  description = "The AWS-CLI profile for the account to create resources in. Leave empty for CI/CD."
+  default     = ""
 }
 variable "aws_region" {
   description = "The AWS region to create resources in."
