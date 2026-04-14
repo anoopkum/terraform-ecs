@@ -8,7 +8,7 @@ variable "environment" {
 }
 
 variable "public_subnet_ids" {
-  type        = list
+  type        = list(any)
   description = "List of public subnet ids to place the loadbalancer in"
 }
 
