@@ -335,6 +335,32 @@ Ensure GitHub Actions secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are
 
 ---
 
+## Issue #10: Missing package-lock.json in CI
+
+**Date:** 2026-04-15  
+**Status:** ✅ Resolved  
+**Severity:** Medium
+
+### Error
+```
+npm error The `npm ci` command can only install with an existing package-lock.json
+```
+
+### Cause
+The `package-lock.json` file was not committed to the repository, but the CI workflow used `npm ci` which requires it.
+
+### Solution
+1. Generated `package-lock.json` locally:
+```bash
+cd app
+npm install --package-lock-only
+```
+
+2. Updated workflow to use `npm install` instead of `npm ci`
+3. Committed `package-lock.json` to the repository
+
+---
+
 ## Future Issues
 
 *This section will be updated as new issues are encountered.*
