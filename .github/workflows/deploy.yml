@@ -1,10 +1,10 @@
-name: Deploy to ECS
+name: Deploy to ECS (Blue/Green)
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment to deploy to'
+        description: 'Deployment environment'
         required: true
         default: 'staging'
         type: choice
@@ -12,22 +12,33 @@ on:
           - staging
           - production
       image_tag:
-        description: 'Image tag to deploy (leave empty for latest)'
-        required: false
-        type: string
+        description: 'Docker image tag to deploy'
+        required: true
+        default: 'latest'
+  workflow_run:
+    workflows: ["Build and Push to ECR"]
+    types: [completed]
+    branches: [master]
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
-  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'acc-app' }}
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: acc-app
+  ECS_CLUSTER: acc
+  ECS_SERVICE: acc-app
+  CODEDEPLOY_APP: acc-ecs-app
+  CODEDEPLOY_GROUP: acc-ecs-dg
+  TASK_FAMILY: acc-app
 
 jobs:
   deploy:
-    name: Deploy to ${{ inputs.environment }}
+    name: Blue/Green Deploy
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -41,41 +52,269 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Determine image tag
-        id: image
+        id: image-tag
         run: |
-          if [ -n "${{ inputs.image_tag }}" ]; then
-            echo "tag=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
           else
-            echo "tag=main" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download task definition
+      - name: Verify image exists in ECR
         run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ inputs.environment }}-app \
-            --query taskDefinition > task-definition.json
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=${{ steps.image-tag.outputs.tag }}
 
-      - name: Update task definition with new image
+      - name: Get current task definition
+        id: current-task
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.TASK_FAMILY }} \
+            --query 'taskDefinition' \
+            --output json 2>/dev/null || echo '{}')
+          
+          if [ "$TASK_DEF" == "{}" ]; then
+            echo "exists=false" >> $GITHUB_OUTPUT
+          else
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "$TASK_DEF" > current-task-def.json
+          fi
+
+      - name: Create task definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: app
-          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image.outputs.tag }}
+        run: |
+          ECR_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image-tag.outputs.tag }}"
+          
+          # Create task definition JSON
+          cat > task-definition.json << EOF
+          {
+            "family": "${{ env.TASK_FAMILY }}",
+            "networkMode": "bridge",
+            "requiresCompatibilities": ["EC2"],
+            "cpu": "256",
+            "memory": "512",
+            "containerDefinitions": [
+              {
+                "name": "app",
+                "image": "${ECR_IMAGE}",
+                "cpu": 256,
+                "memory": 512,
+                "essential": true,
+                "portMappings": [
+                  {
+                    "containerPort": 3000,
+                    "hostPort": 0,
+                    "protocol": "tcp"
+                  }
+                ],
+                "environment": [
+                  {"name": "NODE_ENV", "value": "production"},
+                  {"name": "PORT", "value": "3000"},
+                  {"name": "APP_VERSION", "value": "${{ steps.image-tag.outputs.tag }}"}
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/${{ env.TASK_FAMILY }}",
+                    "awslogs-region": "${{ env.AWS_REGION }}",
+                    "awslogs-stream-prefix": "app"
+                  }
+                },
+                "healthCheck": {
+                  "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"],
+                  "interval": 30,
+                  "timeout": 5,
+                  "retries": 3,
+                  "startPeriod": 60
+                }
+              }
+            ]
+          }
+          EOF
+          
+          cat task-definition.json
 
-      - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ inputs.environment }}-app
-          cluster: ${{ inputs.environment }}
-          wait-for-service-stability: true
+      - name: Create CloudWatch Log Group
+        run: |
+          aws logs create-log-group --log-group-name /ecs/${{ env.TASK_FAMILY }} 2>/dev/null || true
 
-      - name: Notify deployment status
+      - name: Register new task definition
+        id: register-task
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "arn=${TASK_DEF_ARN}" >> $GITHUB_OUTPUT
+          echo "Registered: ${TASK_DEF_ARN}"
+
+      - name: Check if CodeDeploy app exists
+        id: check-codedeploy
+        run: |
+          if aws deploy get-application --application-name ${{ env.CODEDEPLOY_APP }} 2>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if ECS service exists
+        id: check-service
+        run: |
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].status' \
+            --output text 2>/dev/null || echo "MISSING")
+          
+          if [ "$SERVICE_STATUS" == "ACTIVE" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy via ECS (if CodeDeploy not configured)
+        if: steps.check-codedeploy.outputs.exists == 'false'
+        run: |
+          echo "CodeDeploy not configured. Using ECS rolling deployment..."
+          
+          if [ "${{ steps.check-service.outputs.exists }}" == "false" ]; then
+            echo "Creating ECS service..."
+            
+            # Get target group ARN
+            TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+              --names acc-acc-default \
+              --query 'TargetGroups[0].TargetGroupArn' \
+              --output text)
+            
+            aws ecs create-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service-name ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ steps.register-task.outputs.arn }} \
+              --desired-count 1 \
+              --launch-type EC2 \
+              --load-balancers "targetGroupArn=${TARGET_GROUP_ARN},containerName=app,containerPort=3000" \
+              --deployment-configuration "maximumPercent=200,minimumHealthyPercent=50"
+          else
+            echo "Updating ECS service..."
+            aws ecs update-service \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --service ${{ env.ECS_SERVICE }} \
+              --task-definition ${{ steps.register-task.outputs.arn }} \
+              --force-new-deployment
+          fi
+
+      - name: Create CodeDeploy AppSpec
+        if: steps.check-codedeploy.outputs.exists == 'true'
+        run: |
+          # Get container name and port from task definition
+          cat > appspec.yaml << EOF
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "${{ steps.register-task.outputs.arn }}"
+                  LoadBalancerInfo:
+                    ContainerName: "app"
+                    ContainerPort: 3000
+          EOF
+          
+          cat appspec.yaml
+
+      - name: Deploy via CodeDeploy (Blue/Green)
+        if: steps.check-codedeploy.outputs.exists == 'true'
+        id: codedeploy
+        run: |
+          # Create deployment
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name ${{ env.CODEDEPLOY_APP }} \
+            --deployment-group-name ${{ env.CODEDEPLOY_GROUP }} \
+            --revision "revisionType=AppSpecContent,appSpecContent={content='$(cat appspec.yaml | base64 -w0)'}" \
+            --description "Deployment from GitHub Actions - ${{ github.sha }}" \
+            --query 'deploymentId' \
+            --output text)
+          
+          echo "deployment_id=${DEPLOYMENT_ID}" >> $GITHUB_OUTPUT
+          echo "Started deployment: ${DEPLOYMENT_ID}"
+
+      - name: Wait for CodeDeploy deployment
+        if: steps.check-codedeploy.outputs.exists == 'true' && steps.codedeploy.outputs.deployment_id != ''
+        run: |
+          echo "Waiting for deployment ${{ steps.codedeploy.outputs.deployment_id }}..."
+          
+          aws deploy wait deployment-successful \
+            --deployment-id ${{ steps.codedeploy.outputs.deployment_id }} || {
+            echo "Deployment failed or timed out"
+            aws deploy get-deployment \
+              --deployment-id ${{ steps.codedeploy.outputs.deployment_id }} \
+              --query 'deploymentInfo.{Status:status,ErrorInfo:errorInformation}'
+            exit 1
+          }
+          
+          echo "Deployment successful!"
+
+      - name: Wait for ECS service stability
+        if: steps.check-codedeploy.outputs.exists == 'false'
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --timeout 300 || true
+
+      - name: Get deployment info
+        id: deployment-info
+        run: |
+          # Get ALB DNS
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names acc-acc \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "alb_dns=${ALB_DNS}" >> $GITHUB_OUTPUT
+          
+          # Get running task count
+          RUNNING_TASKS=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].runningCount' \
+            --output text 2>/dev/null || echo "0")
+          echo "running_tasks=${RUNNING_TASKS}" >> $GITHUB_OUTPUT
+
+      - name: Health check
+        run: |
+          echo "Performing health check..."
+          ALB_DNS="${{ steps.deployment-info.outputs.alb_dns }}"
+          
+          for i in {1..5}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/health" || echo "000")
+            if [ "$HTTP_CODE" == "200" ]; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $HTTP_CODE - waiting..."
+            sleep 10
+          done
+          
+          echo "⚠️ Health check did not return 200, but deployment may still be in progress"
+
+      - name: Deployment Summary
         if: always()
         run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Deployment to ${{ inputs.environment }} successful!"
-          else
-            echo "❌ Deployment to ${{ inputs.environment }} failed!"
-          fi
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment || 'staging' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | ${{ steps.image-tag.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Task Definition | ${{ steps.register-task.outputs.arn }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | ${{ env.ECS_CLUSTER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ env.ECS_SERVICE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Running Tasks | ${{ steps.deployment-info.outputs.running_tasks }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment Type | ${{ steps.check-codedeploy.outputs.exists == 'true' && 'CodeDeploy Blue/Green' || 'ECS Rolling' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ALB URL | http://${{ steps.deployment-info.outputs.alb_dns }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test your deployment:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "curl http://${{ steps.deployment-info.outputs.alb_dns }}/health" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

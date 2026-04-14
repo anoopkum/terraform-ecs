@@ -1,0 +1,52 @@
+{
+  "family": "acc-app",
+  "networkMode": "bridge",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "${ECR_IMAGE}",
+      "cpu": 256,
+      "memory": 512,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 0,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "PORT",
+          "value": "3000"
+        },
+        {
+          "name": "APP_VERSION",
+          "value": "${APP_VERSION}"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/acc-app",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "app"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ],
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "256",
+  "memory": "512"
+}
