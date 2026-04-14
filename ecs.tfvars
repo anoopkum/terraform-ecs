@@ -2,7 +2,8 @@
 environment = "acc"
 
 # The AWS-CLI profile for the account to create resources in.
-aws_profile = "default"
+# Leave empty for CI/CD (uses environment variables instead).
+aws_profile = ""
 
 # The AWS region to create resources in.
 aws_region = "eu-west-1"

@@ -107,8 +107,8 @@ resource "aws_iam_user_policy" "github_actions_ecr" {
         Resource = "*"
       },
       {
-        Effect = "Allow"
-        Action = ["iam:PassRole"]
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
         Resource = "arn:aws:iam::*:role/ecs/*"
       }
     ]

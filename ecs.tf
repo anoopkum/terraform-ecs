@@ -13,13 +13,15 @@ terraform {
     key          = "terraform/ecs/terraform.tfstate"
     region       = "eu-west-1"
     encrypt      = true
-    use_lockfile = true  # Native S3 locking (Terraform 1.10+), no DynamoDB needed
+    use_lockfile = true # Native S3 locking (Terraform 1.10+), no DynamoDB needed
   }
 }
 
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
+  # Profile is only used for local development, not in CI
+  # In CI, AWS credentials come from environment variables
+  profile = var.aws_profile != "" ? var.aws_profile : null
 }
 
 module "ecs" {
@@ -27,7 +29,7 @@ module "ecs" {
 
   environment          = var.environment
   cluster              = var.environment
-  cloudwatch_prefix    = "${var.environment}"           #See ecs_instances module when to set this and when not!
+  cloudwatch_prefix    = var.environment #See ecs_instances module when to set this and when not!
   vpc_cidr             = var.vpc_cidr
   public_subnet_cidrs  = var.public_subnet_cidrs
   private_subnet_cidrs = var.private_subnet_cidrs
@@ -55,7 +57,8 @@ variable "environment" {
   description = "A name to describe the environment we're creating."
 }
 variable "aws_profile" {
-  description = "The AWS-CLI profile for the account to create resources in."
+  description = "The AWS-CLI profile for the account to create resources in. Leave empty for CI/CD."
+  default     = ""
 }
 variable "aws_region" {
   description = "The AWS region to create resources in."
@@ -68,15 +71,15 @@ variable "vpc_cidr" {
 }
 variable "public_subnet_cidrs" {
   description = "The IP ranges to use for the public subnets in your VPC."
-  type = list
+  type        = list(any)
 }
 variable "private_subnet_cidrs" {
   description = "The IP ranges to use for the private subnets in your VPC."
-  type = list
+  type        = list(any)
 }
 variable "availability_zones" {
   description = "The AWS availability zones to create subnets in."
-  type = list
+  type        = list(any)
 }
 variable "max_size" {
   description = "Maximum number of instances in the ECS cluster."
@@ -92,7 +95,8 @@ variable "instance_type" {
 }
 
 output "default_alb_target_group" {
-  value = module.ecs.default_alb_target_group
+  value       = module.ecs.default_alb_target_group
+  description = "Default ALB target group ARN"
 }
 
 

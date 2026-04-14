@@ -2,13 +2,13 @@ name: Terraform CI/CD
 
 on:
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - '**.tf'
       - '**.tfvars'
       - '.github/workflows/terraform.yml'
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - '**.tf'
       - '**.tfvars'
@@ -232,7 +232,7 @@ jobs:
   terraform-apply:
     name: Apply
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     environment: production
     steps:
       - uses: actions/checkout@v4

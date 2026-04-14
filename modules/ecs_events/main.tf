@@ -25,8 +25,8 @@ resource "aws_cloudwatch_event_rule" "ecs_task_stopped" {
 }
 
 resource "aws_cloudwatch_event_target" "event_fired" {
-  rule  = aws_cloudwatch_event_rule.ecs_task_stopped.name
-  arn   = aws_sns_topic.ecs_events.arn
+  rule = aws_cloudwatch_event_rule.ecs_task_stopped.name
+  arn  = aws_sns_topic.ecs_events.arn
   input = jsonencode({
     message    = "Essential container in task exited"
     account_id = data.aws_caller_identity.current.account_id
