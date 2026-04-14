@@ -1,4 +1,16 @@
 aws.tf
 .terraform
+.terraform.lock.hcl
 terraform.tfstate*
+*.tfplan
+tfplan
+plan_output.txt
 .idea/
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

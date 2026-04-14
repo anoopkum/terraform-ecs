@@ -1,0 +1,93 @@
+# Argo Rollouts for Blue/Green and Canary deployments
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: app-rollout
+  labels:
+    app: app
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: app
+          image: app:latest
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  strategy:
+    blueGreen:
+      # Active service that receives production traffic
+      activeService: app-active
+      # Preview service for testing new version
+      previewService: app-preview
+      # Auto-promote after preview is healthy
+      autoPromotionEnabled: false
+      # Scale down delay after promotion
+      scaleDownDelaySeconds: 30
+      # Preview replica count
+      previewReplicaCount: 1
+      # Anti-affinity for spreading pods
+      antiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          weight: 100
+---
+# Active service (receives production traffic)
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-active
+  labels:
+    app: app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: app
+---
+# Preview service (for testing new version)
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-preview
+  labels:
+    app: app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: app
