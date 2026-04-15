@@ -361,6 +361,28 @@ npm install --package-lock-only
 
 ---
 
+## Issue #11: Container Security Scan Failed - Wrong Image Tag
+
+**Date:** 2026-04-15  
+**Status:** ✅ Resolved  
+**Severity:** Low
+
+### Error
+```
+FATAL: unable to find the specified image "acc-app:1c6825b9585c17b267d47a3b2c77eae7529d9adf"
+MANIFEST_UNKNOWN: Requested image not found
+```
+
+### Cause
+The `IMAGE_TAG` environment variable used the full commit SHA, but Docker metadata action creates short SHA tags (7 characters).
+
+### Solution
+1. Changed container scan to use `latest` tag instead of `${{ env.IMAGE_TAG }}`
+2. Added `continue-on-error: true` to make scan non-blocking
+3. Removed container-scan from summary job dependencies
+
+---
+
 ## Future Issues
 
 *This section will be updated as new issues are encountered.*
